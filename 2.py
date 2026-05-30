@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import r2_score
 from sklearn.model_selection import KFold, cross_val_predict
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -131,40 +131,102 @@ X_train = train_fe[feature_cols].values
 y_train = train_fe['demand'].values
 X_test  = test_fe[feature_cols].values
 
+# ── OPTIMIZED HYPERPARAMETERS (Better tuned) ────────────────────────────────────
 configs = [
-    dict(max_iter=800,  learning_rate=0.03, max_depth=10, min_samples_leaf=10, l2_regularization=0.5, random_state=42),
-    dict(max_iter=600,  learning_rate=0.05, max_depth=8,  min_samples_leaf=15, l2_regularization=1.0, random_state=0),
-    dict(max_iter=1000, learning_rate=0.02, max_depth=12, min_samples_leaf=5,  l2_regularization=0.1, random_state=7),
-    dict(max_iter=1200, learning_rate=0.015,max_depth=11, min_samples_leaf=8,  l2_regularization=0.3, random_state=13),
-    dict(max_iter=700,  learning_rate=0.04, max_depth=9,  min_samples_leaf=12, l2_regularization=0.7, random_state=99),
+    dict(max_iter=1000, learning_rate=0.025, max_depth=11, min_samples_leaf=6, l2_regularization=0.4, random_state=42),
+    dict(max_iter=900,  learning_rate=0.035, max_depth=10, min_samples_leaf=8, l2_regularization=0.55, random_state=123),
+    dict(max_iter=1100, learning_rate=0.018, max_depth=12, min_samples_leaf=5, l2_regularization=0.25, random_state=456),
+    dict(max_iter=1050, learning_rate=0.022, max_depth=11, min_samples_leaf=7, l2_regularization=0.35, random_state=789),
+    dict(max_iter=950,  learning_rate=0.032, max_depth=10, min_samples_leaf=9, l2_regularization=0.45, random_state=321),
+    dict(max_iter=1150, learning_rate=0.016, max_depth=13, min_samples_leaf=4, l2_regularization=0.2, random_state=654),
+    dict(max_iter=850,  learning_rate=0.038, max_depth=9,  min_samples_leaf=10, l2_regularization=0.6, random_state=987),
 ]
 
 cv = KFold(n_splits=5, shuffle=True, random_state=42)
 oof_preds  = np.zeros((len(y_train), len(configs)))
 test_preds = np.zeros((len(X_test),  len(configs)))
 
+print("Training ensemble models...")
 for i, cfg in enumerate(configs):
     print(f"Training model {i+1}/{len(configs)} ...")
     m = HistGradientBoostingRegressor(**cfg)
     oof_preds[:,i] = cross_val_predict(m, X_train, y_train, cv=cv, n_jobs=-1)
     m.fit(X_train, y_train)
     test_preds[:,i] = m.predict(X_test)
-    print(f"  OOF R²: {r2_score(y_train, oof_preds[:,i]):.4f}")
+    r2 = r2_score(y_train, oof_preds[:,i])
+    print(f"  OOF R²: {r2:.6f}")
+
+# ── ADVANCED WEIGHT OPTIMIZATION ────────────────────────────────────
+print("\nOptimizing ensemble weights with advanced methods...")
 
 def neg_r2(w):
-    w = np.abs(w)/np.abs(w).sum()
-    return -r2_score(y_train, oof_preds @ w)
+    w_norm = np.abs(w) / (np.abs(w).sum() + 1e-10)
+    return -r2_score(y_train, oof_preds @ w_norm)
 
-res    = minimize(neg_r2, np.ones(len(configs))/len(configs), method='Nelder-Mead')
-best_w = np.abs(res.x)/np.abs(res.x).sum()
-best_r2 = r2_score(y_train, oof_preds @ best_w)
+# Try multiple optimization methods
+best_r2_score = -np.inf
+best_weights = np.ones(len(configs)) / len(configs)
 
-print(f"\nOptimised weights : {best_w.round(3)}")
-print(f"OOF R²            : {best_r2:.4f}")
-print(f"Estimated score   : {100*best_r2:.2f} / 100")
+# Method 1: Nelder-Mead
+print("  Method 1: Nelder-Mead optimization...")
+res1 = minimize(neg_r2, np.ones(len(configs))/len(configs), method='Nelder-Mead', 
+                options={'maxiter': 5000, 'xatol': 1e-8, 'fatol': 1e-8})
+w1 = np.abs(res1.x) / np.abs(res1.x).sum()
+r2_1 = r2_score(y_train, oof_preds @ w1)
+print(f"    R²: {r2_1:.6f}")
+if r2_1 > best_r2_score:
+    best_r2_score = r2_1
+    best_weights = w1
 
-final_preds = np.clip(test_preds @ best_w, 0, 1)
+# Method 2: Differential Evolution (more global)
+print("  Method 2: Differential Evolution...")
+bounds = [(0.01, 1)] * len(configs)
+res2 = differential_evolution(neg_r2, bounds, seed=42, maxiter=1000, atol=1e-8, tol=1e-8)
+w2 = np.abs(res2.x) / np.abs(res2.x).sum()
+r2_2 = r2_score(y_train, oof_preds @ w2)
+print(f"    R²: {r2_2:.6f}")
+if r2_2 > best_r2_score:
+    best_r2_score = r2_2
+    best_weights = w2
+
+# Method 3: SLSQP with constraints
+print("  Method 3: SLSQP with constraints...")
+from scipy.optimize import minimize as scipy_minimize
+constraints = ({'type': 'eq', 'fun': lambda w: np.sum(np.abs(w)) - 1.0})
+res3 = scipy_minimize(neg_r2, np.ones(len(configs))/len(configs), 
+                      method='SLSQP', constraints=constraints,
+                      options={'maxiter': 5000, 'ftol': 1e-9})
+w3 = np.abs(res3.x) / np.abs(res3.x).sum()
+r2_3 = r2_score(y_train, oof_preds @ w3)
+print(f"    R²: {r2_3:.6f}")
+if r2_3 > best_r2_score:
+    best_r2_score = r2_3
+    best_weights = w3
+
+best_w = best_weights
+best_r2 = best_r2_score
+
+print(f"\n✓ Best ensemble found!")
+print(f"Optimised weights:")
+for i, w in enumerate(best_w):
+    print(f"  Model {i+1}: {w:.4f}")
+print(f"OOF R²            : {best_r2:.6f}")
+print(f"Estimated score   : {100*best_r2:.4f} / 100")
+
+# ── INTELLIGENT CLIPPING ────────────────────────────────────
+# Use quantile-based clipping instead of hard [0,1]
+q_min = np.percentile(y_train, 0.5)
+q_max = np.percentile(y_train, 99.5)
+
+final_preds_raw = test_preds @ best_w
+final_preds = np.clip(final_preds_raw, q_min, q_max)
+
 submission  = pd.DataFrame({'Index': test['Index'], 'demand': final_preds})
 submission.to_csv('submission.csv', index=False)
 print(f"\nsubmission.csv saved  →  {submission.shape[0]} rows × {submission.shape[1]} cols")
+print(f"\nPrediction Statistics:")
+print(f"  Min: {final_preds.min():.6f}")
+print(f"  Max: {final_preds.max():.6f}")
+print(f"  Mean: {final_preds.mean():.6f}")
+print(f"  Median: {np.median(final_preds):.6f}")
 print(submission.head())
